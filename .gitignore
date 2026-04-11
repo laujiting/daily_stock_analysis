@@ -75,3 +75,5 @@ CLAUDE.md
 
 # ignore static files
 static/
+apps/dsa-web/CodeRepofina.npm-cache
+CodeRepofina.npm-cache

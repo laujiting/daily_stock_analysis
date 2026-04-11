@@ -126,11 +126,11 @@ class AnalysisTaskQueue:
                     cls._instance = super().__new__(cls)
         return cls._instance
     
-    def __init__(self, max_workers: int = 3):
+    def __init__(self, max_workers: int = 1):
         # 防止重复初始化
         if hasattr(self, '_initialized') and self._initialized:
             return
-        
+
         self._max_workers = max_workers
         self._executor: Optional[ThreadPoolExecutor] = None
         
@@ -153,7 +153,10 @@ class AnalysisTaskQueue:
         self._max_history = 100
         
         self._initialized = True
-        logger.info(f"[TaskQueue] 初始化完成，最大并发: {max_workers}")
+        if max_workers == 1:
+            logger.info(f"[TaskQueue] 初始化完成，当前为串行执行模式，同一时间仅执行一个分析任务")
+        else:
+            logger.info(f"[TaskQueue] 初始化完成，最大并发: {max_workers}")
     
     @property
     def executor(self) -> ThreadPoolExecutor:

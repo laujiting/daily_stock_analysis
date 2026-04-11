@@ -1,9 +1,9 @@
 import type React from 'react';
 import { useState, useEffect, useCallback, useRef } from 'react';
-import type { HistoryItem, AnalysisReport, TaskInfo } from '../types/analysis';
+import type { HistoryItem, AnalysisReport, TaskInfo, BulkAnalysisResult } from '../types/analysis';
 import { historyApi } from '../api/history';
 import { analysisApi, DuplicateTaskError } from '../api/analysis';
-import { validateStockCode } from '../utils/validation';
+import { validateStockCodes } from '../utils/validation';
 import { getRecentStartDate, toDateInputValue } from '../utils/format';
 import { useAnalysisStore } from '../stores/analysisStore';
 import { ReportSummary } from '../components/report';
@@ -19,11 +19,13 @@ const HomePage: React.FC = () => {
   const { setLoading, setError: setStoreError } = useAnalysisStore();
 
   // 输入状态
-  const [stockCode, setStockCode] = useState('');
+  const [stockCodeInput, setStockCodeInput] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [inputError, setInputError] = useState<string>();
+  const [bulkResult, setBulkResult] = useState<BulkAnalysisResult | null>(null);
+  const [showResult, setShowResult] = useState(false);
 
-// 历史列表状态
+  // 历史列表状态
   const [historyItems, setHistoryItems] = useState<HistoryItem[]>([]);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
@@ -37,7 +39,6 @@ const HomePage: React.FC = () => {
 
   // 任务队列状态
   const [activeTasks, setActiveTasks] = useState<TaskInfo[]>([]);
-  const [duplicateError, setDuplicateError] = useState<string | null>(null);
 
   // 用于跟踪当前分析请求，避免竞态条件
   const analysisRequestIdRef = useRef<number>(0);
@@ -168,16 +169,11 @@ const HomePage: React.FC = () => {
     }
   };
 
-  // 分析股票（异步模式）
+  // 分析股票（支持批量模式）
   const handleAnalyze = async () => {
-    const { valid, message, normalized } = validateStockCode(stockCode);
-    if (!valid) {
-      setInputError(message);
-      return;
-    }
-
     setInputError(undefined);
-    setDuplicateError(null);
+    setBulkResult(null);
+    setShowResult(false);
     setIsAnalyzing(true);
     setLoading(true);
     setStoreError(null);
@@ -186,38 +182,122 @@ const HomePage: React.FC = () => {
     const currentRequestId = ++analysisRequestIdRef.current;
 
     try {
-      // 使用异步模式提交分析
-      const response = await analysisApi.analyzeAsync({
-        stockCode: normalized,
-        reportType: 'detailed',
+      // 1. 批量验证输入
+      const validationResult = validateStockCodes(stockCodeInput);
+
+      if (validationResult.validCodes.length === 0 && validationResult.invalidCodes.length === 0) {
+        setInputError('请输入有效的股票代码');
+        return;
+      }
+
+      // 2. 查重处理
+      const skippedCodes: Array<{ code: string; reason: string }> = [];
+      const validCodesAfterCheck: string[] = [];
+
+      // 处理输入重复
+      validationResult.duplicateCodes.forEach(code => {
+        skippedCodes.push({ code, reason: '输入重复' });
       });
 
-      // 清空输入框
-      if (currentRequestId === analysisRequestIdRef.current) {
-        setStockCode('');
+      // 检查每个有效代码
+      for (const code of validationResult.validCodes) {
+        // 检查是否在活跃任务队列中
+        const isInActiveQueue = activeTasks.some(
+          task => task.stockCode.toUpperCase() === code.toUpperCase() &&
+          (task.status === 'pending' || task.status === 'processing')
+        );
+        if (isInActiveQueue) {
+          skippedCodes.push({ code, reason: '正在分析中' });
+          continue;
+        }
+
+        // 检查今日是否已分析
+        const isAnalyzedToday = await historyApi.isStockAnalyzedToday(code);
+        if (isAnalyzedToday) {
+          skippedCodes.push({ code, reason: '今日已分析' });
+          continue;
+        }
+
+        validCodesAfterCheck.push(code);
       }
 
-      // 任务已提交，SSE 会推送更新
-      console.log('Task submitted:', response.taskId);
-    } catch (err) {
-      console.error('Analysis failed:', err);
-      if (currentRequestId === analysisRequestIdRef.current) {
-        if (err instanceof DuplicateTaskError) {
-          // 显示重复任务错误
-          setDuplicateError(`股票 ${err.stockCode} 正在分析中，请等待完成`);
-        } else {
-          setStoreError(err instanceof Error ? err.message : '分析失败');
+      // 3. 批量提交分析任务
+      const tasksCreated: Array<{ taskId: string; stockCode: string }> = [];
+      const errors: Array<{ code: string; message: string }> = [];
+
+      for (const code of validCodesAfterCheck) {
+        try {
+          const response = await analysisApi.analyzeAsync({
+            stockCode: code,
+            reportType: 'detailed',
+          });
+          tasksCreated.push({ taskId: response.taskId, stockCode: code });
+        } catch (err) {
+          console.error(`Failed to analyze ${code}:`, err);
+          if (err instanceof DuplicateTaskError) {
+            skippedCodes.push({ code, reason: '正在分析中' });
+          } else {
+            errors.push({
+              code,
+              message: err instanceof Error ? err.message : '分析失败'
+            });
+          }
         }
       }
+
+      // 4. 处理结果
+      if (currentRequestId === analysisRequestIdRef.current) {
+        // 构造批量结果
+        const result: BulkAnalysisResult = {
+          totalInput: validationResult.validCodes.length + validationResult.invalidCodes.length + validationResult.duplicateCodes.length,
+          validCount: validCodesAfterCheck.length,
+          skippedCount: skippedCodes.length + validationResult.invalidCodes.length,
+          errorCount: errors.length,
+          tasksCreated,
+          skippedCodes: [
+            ...skippedCodes,
+            ...validationResult.invalidCodes.map(c => ({ code: c.code, reason: c.message }))
+          ],
+          errors,
+        };
+
+        setBulkResult(result);
+        setShowResult(true);
+
+        // 清空输入框（如果没有错误或者用户希望保留输入可以考虑不清理，这里保持原有行为）
+        if (errors.length === 0) {
+          setStockCodeInput('');
+        }
+
+        // 自动隐藏结果提示，3秒后
+        setTimeout(() => {
+          setShowResult(false);
+        }, 8000);
+      }
+    } catch (err) {
+      console.error('Bulk analysis failed:', err);
+      if (currentRequestId === analysisRequestIdRef.current) {
+        setStoreError(err instanceof Error ? err.message : '批量分析失败');
+      }
     } finally {
-      setIsAnalyzing(false);
-      setLoading(false);
+      if (currentRequestId === analysisRequestIdRef.current) {
+        setIsAnalyzing(false);
+        setLoading(false);
+      }
     }
   };
 
-  // 回车提交
+  // 回车提交（支持Ctrl+Enter提交多行输入）
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && stockCode && !isAnalyzing) {
+    // 如果是普通回车且不是Ctrl/Command组合键，阻止默认换行（除非用户希望换行）
+    if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey) {
+      // 如果是单行输入模式下直接提交，这里现在是textarea，默认回车是换行
+      // 所以改为Ctrl+Enter提交
+      return;
+    }
+    // Ctrl+Enter 提交
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && stockCodeInput && !isAnalyzing) {
+      e.preventDefault();
       handleAnalyze();
     }
   };
@@ -228,29 +308,77 @@ const HomePage: React.FC = () => {
       <header className="flex-shrink-0 px-4 py-3 border-b border-white/5">
         <div className="flex items-center gap-2 max-w-2xl">
           <div className="flex-1 relative">
-            <input
-              type="text"
-              value={stockCode}
+            <textarea
+              value={stockCodeInput}
               onChange={(e) => {
-                setStockCode(e.target.value.toUpperCase());
+                setStockCodeInput(e.target.value.toUpperCase());
                 setInputError(undefined);
+                setShowResult(false);
               }}
               onKeyDown={handleKeyDown}
-              placeholder="输入股票代码，如 600519、00700、AAPL"
+              placeholder="输入股票代码，支持逗号/换行分隔，如 600519, 00700, AAPL&#10;按 Ctrl+Enter 提交分析"
               disabled={isAnalyzing}
-              className={`input-terminal w-full ${inputError ? 'border-danger/50' : ''}`}
+              className={`input-terminal w-full min-h-[60px] resize-y ${inputError ? 'border-danger/50' : ''}`}
+              rows={2}
             />
             {inputError && (
               <p className="absolute -bottom-4 left-0 text-xs text-danger">{inputError}</p>
             )}
-            {duplicateError && (
-              <p className="absolute -bottom-4 left-0 text-xs text-warning">{duplicateError}</p>
+
+            {/* 批量分析结果提示 */}
+            {showResult && bulkResult && (
+              <div className="absolute z-10 left-0 right-0 -bottom-[120px] bg-elevated border border-white/10 rounded-lg p-3 text-xs shadow-lg">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-white font-medium">批量分析结果</span>
+                  <button
+                    onClick={() => setShowResult(false)}
+                    className="text-muted hover:text-white"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <div className="space-y-1.5">
+                  <p>
+                    总输入: {bulkResult.totalInput} 只 |
+                    已提交: {bulkResult.tasksCreated.length} 只 |
+                    已跳过: {bulkResult.skippedCount} 只 |
+                    错误: {bulkResult.errorCount} 只
+                  </p>
+                  {bulkResult.skippedCodes.length > 0 && (
+                    <div>
+                      <p className="text-warning mb-1">跳过的股票:</p>
+                      <ul className="pl-4 list-disc">
+                        {bulkResult.skippedCodes.slice(0, 5).map((item, idx) => (
+                          <li key={idx} className="text-muted">
+                            {item.code}: {item.reason}
+                          </li>
+                        ))}
+                        {bulkResult.skippedCodes.length > 5 && (
+                          <li className="text-muted">... 还有 {bulkResult.skippedCodes.length - 5} 只</li>
+                        )}
+                      </ul>
+                    </div>
+                  )}
+                  {bulkResult.errors.length > 0 && (
+                    <div>
+                      <p className="text-danger mb-1">分析失败:</p>
+                      <ul className="pl-4 list-disc">
+                        {bulkResult.errors.map((item, idx) => (
+                          <li key={idx} className="text-danger">
+                            {item.code}: {item.message}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              </div>
             )}
           </div>
           <button
             type="button"
             onClick={handleAnalyze}
-            disabled={!stockCode || isAnalyzing}
+            disabled={!stockCodeInput.trim() || isAnalyzing}
             className="btn-primary flex items-center gap-1.5 whitespace-nowrap"
           >
             {isAnalyzing ? (

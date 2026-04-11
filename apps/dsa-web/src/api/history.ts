@@ -67,4 +67,27 @@ export const historyApi = {
       items: (data.items || []).map(item => toCamelCase<NewsIntelItem>(item)),
     };
   },
+
+  /**
+   * 检查股票今日是否已分析
+   * @param stockCode 股票代码
+   */
+  isStockAnalyzedToday: async (stockCode: string): Promise<boolean> => {
+    const today = new Date().toISOString().split('T')[0];
+
+    try {
+      const response = await historyApi.getList({
+        stockCode,
+        startDate: today,
+        endDate: today,
+        page: 1,
+        limit: 1,
+      });
+
+      return response.items.length > 0;
+    } catch (error) {
+      console.error(`Failed to check history for ${stockCode}:`, error);
+      return false; // 默认未分析，避免误阻止
+    }
+  },
 };

@@ -192,3 +192,22 @@ export const getSentimentColor = (score: number): string => {
   if (score <= 80) return '#22c55e'; // green-500
   return '#10b981'; // emerald-500
 };
+
+// ============ 批量分析相关类型 ============
+
+/** 重复检查结果 */
+export interface DuplicateCheckResult {
+  skippedCodes: Array<{ code: string; reason: 'input_duplicate' | 'active_task' | 'today_analyzed' }>;
+  validCodes: string[];
+}
+
+/** 批量分析响应结果 */
+export interface BulkAnalysisResult {
+  totalInput: number;
+  validCount: number;
+  skippedCount: number;
+  errorCount: number;
+  tasksCreated: Array<{ taskId: string; stockCode: string }>;
+  skippedCodes: Array<{ code: string; reason: string }>;
+  errors: Array<{ code: string; message: string }>;
+}
