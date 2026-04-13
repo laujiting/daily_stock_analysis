@@ -10,10 +10,12 @@
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import Optional, Dict, Any, List
 
 from src.repositories.stock_repo import StockRepository
+from src.storage import get_db, AnalysisHistory
+from sqlalchemy import select, and_, desc
 
 logger = logging.getLogger(__name__)
 
@@ -111,18 +113,63 @@ class StockService:
                 f"暂不支持 '{period}' 周期，目前仅支持 'daily'。"
                 "weekly/monthly 聚合功能将在后续版本实现。"
             )
-        
+
+        # 计算日期范围
+        end_date = date.today()
+        start_date = end_date - timedelta(days=days)
+
+        # 优先从本地数据库查询数据
+        db = get_db()
+        local_data = db.get_data_range(stock_code, start_date, end_date)
+
+        # 如果本地数据足够（数量 >= days * 0.8，考虑节假日），直接返回本地数据
+        if len(local_data) >= days * 0.8:
+            logger.info(f"从本地数据库获取 {stock_code} {len(local_data)} 天数据")
+            # 获取股票名称
+            stock_name = None
+            try:
+                from data_provider.base import DataFetcherManager
+                manager = DataFetcherManager()
+                stock_name = manager.get_stock_name(stock_code)
+            except Exception:
+                pass
+
+            # 转换为响应格式
+            data = []
+            for item in local_data:
+                data.append({
+                    "date": item.date.isoformat(),
+                    "open": item.open,
+                    "high": item.high,
+                    "low": item.low,
+                    "close": item.close,
+                    "volume": item.volume,
+                    "amount": item.amount,
+                    "change_percent": item.pct_chg,
+                })
+
+            return {
+                "stock_code": stock_code,
+                "stock_name": stock_name,
+                "period": period,
+                "data": data,
+            }
+
+        # 本地数据不足，从远程获取
         try:
             # 调用数据获取器获取历史数据
             from data_provider.base import DataFetcherManager
-            
+
             manager = DataFetcherManager()
             df, source = manager.get_daily_data(stock_code, days=days)
-            
+
             if df is None or df.empty:
                 logger.warning(f"获取 {stock_code} 历史数据失败")
                 return {"stock_code": stock_code, "period": period, "data": []}
-            
+
+            # 保存数据到本地数据库
+            db.save_daily_data(df, stock_code, data_source=source)
+
             # 获取股票名称
             stock_name = manager.get_stock_name(stock_code)
             
@@ -184,3 +231,72 @@ class StockService:
             "amount": None,
             "update_time": datetime.now().isoformat(),
         }
+
+    def get_effective_analysis_date(self) -> date:
+        """
+        获取有效的分析日期：
+        - 工作日：如果在交易时间内（9:30-15:00），使用今天；否则使用最近一个交易日
+        - 周末/节假日：使用最近一个交易日
+        """
+        today = date.today()
+        weekday = today.weekday()
+
+        # 周末 (周六5/周日6)
+        if weekday >= 5:
+            # 减去 (weekday - 4) 天，得到上周五
+            return today - timedelta(days=weekday - 4)
+
+        # 工作日，判断当前时间
+        now = datetime.now()
+        market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
+        market_close = now.replace(hour=15, minute=0, second=0, microsecond=0)
+
+        if now < market_open:
+            # 开盘前，使用上一个交易日
+            return today - timedelta(days=1 if weekday > 0 else 3) # 周一的话减3天到上周五
+        elif now > market_close:
+            # 收盘后，使用今天
+            return today
+        else:
+            # 交易时间内，使用今日
+            return today
+
+    def get_latest_trading_date(self, stock_code: str) -> Optional[date]:
+        """
+        获取股票最新的交易日日期
+
+        Args:
+            stock_code: 股票代码
+
+        Returns:
+            最新的交易日日期，如果没有数据返回None
+        """
+        db = get_db()
+        recent_data = db.get_latest_data(stock_code, days=1)
+        if recent_data:
+            return recent_data[0].date
+        return None
+
+    def has_analysis_for_date(self, stock_code: str, analysis_date: date) -> bool:
+        """
+        检查指定股票在指定日期是否已有分析记录
+
+        Args:
+            stock_code: 股票代码
+            analysis_date: 分析日期（通常是有效的交易日）
+
+        Returns:
+            是否已存在分析记录
+        """
+        db = get_db()
+        with db.get_session() as session:
+            result = session.execute(
+                select(AnalysisHistory).where(
+                    and_(
+                        AnalysisHistory.code == stock_code,
+                        AnalysisHistory.trading_date == analysis_date
+                    )
+                )
+            ).scalar_one_or_none()
+
+            return result is not None

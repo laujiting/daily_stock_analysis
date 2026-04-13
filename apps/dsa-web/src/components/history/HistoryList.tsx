@@ -68,7 +68,14 @@ export const HistoryList: React.FC<HistoryListProps> = ({
 
   return (
     <aside className={`glass-card overflow-hidden flex flex-col ${className}`}>
-      <div ref={scrollContainerRef} className="p-3 flex-1 overflow-y-auto">
+      <div 
+        ref={scrollContainerRef} 
+        className="p-3 flex-1 overflow-y-auto"
+        style={{ 
+          scrollbarWidth: 'thin',
+          scrollbarColor: 'rgba(139, 92, 246, 0.5) transparent'
+        }}
+      >
         <h2 className="text-xs font-medium text-purple uppercase tracking-wider mb-3 flex items-center gap-1.5">
           <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />

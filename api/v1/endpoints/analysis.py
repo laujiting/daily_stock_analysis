@@ -47,12 +47,102 @@ from src.config import Config
 from src.services.task_queue import (
     get_task_queue,
     DuplicateTaskError,
+    DuplicateAnalysisError,
     TaskStatus as TaskStatusEnum,
 )
+from src.services.stock_service import StockService
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+class CheckDuplicateRequest(BaseModel):
+    stock_code: str
+    force_refresh: bool = False
+
+
+class CheckDuplicateResponse(BaseModel):
+    duplicate: bool
+    reason: Optional[str] = None
+    latest_analysis_at: Optional[str] = None
+
+
+# ============================================================
+# POST /check-duplicate - 检查是否重复分析
+# ============================================================
+
+@router.post(
+    "/check-duplicate",
+    response_model=CheckDuplicateResponse,
+    responses={
+        200: {"description": "检查结果"},
+        400: {"description": "参数错误", "model": ErrorResponse},
+        500: {"description": "服务器错误", "model": ErrorResponse},
+    },
+    summary="检查是否重复分析",
+    description="检查指定股票在当前有效交易日是否已有分析记录，或者是否正在分析中"
+)
+def check_duplicate_analysis(request: CheckDuplicateRequest) -> CheckDuplicateResponse:
+    """
+    检查是否重复分析
+
+    Args:
+        request: 检查请求参数，包含股票代码和是否强制刷新
+
+    Returns:
+        CheckDuplicateResponse: 检查结果
+    """
+    try:
+        stock_code = request.stock_code.strip()
+        if not stock_code:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "validation_error",
+                    "message": "stock_code 不能为空"
+                }
+            )
+
+        # 检查是否正在分析中
+        task_queue = get_task_queue()
+        if task_queue.is_analyzing(stock_code):
+            existing_task_id = task_queue.get_analyzing_task_id(stock_code)
+            return CheckDuplicateResponse(
+                duplicate=True,
+                reason=f"股票 {stock_code} 正在分析中 (task_id: {existing_task_id})",
+                latest_analysis_at=None
+            )
+
+        # 非强制刷新的情况下，检查是否已有该交易日的分析记录
+        if not request.force_refresh:
+            stock_service = StockService()
+            effective_date = stock_service.get_effective_analysis_date()
+            if stock_service.has_analysis_for_date(stock_code, effective_date):
+                return CheckDuplicateResponse(
+                    duplicate=True,
+                    reason=f"股票 {stock_code} 在 {effective_date.isoformat()} 已经有分析记录",
+                    latest_analysis_at=effective_date.isoformat()
+                )
+
+        # 没有重复
+        return CheckDuplicateResponse(
+            duplicate=False,
+            reason=None,
+            latest_analysis_at=None
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"检查重复分析失败: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "internal_error",
+                "message": f"检查重复分析失败: {str(e)}"
+            }
+        )
 
 
 # ============================================================

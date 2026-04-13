@@ -3,6 +3,28 @@
  * 与 API 规范 (api_spec.json) 对齐
  */
 
+// ============ K 线数据类型 ============
+
+/** K 线数据点 */
+export interface KLineData {
+  date: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume?: number;
+  amount?: number;
+  changePercent?: number;
+}
+
+/** 股票历史行情响应 */
+export interface StockHistoryResponse {
+  stockCode: string;
+  stockName?: string;
+  period: string;
+  data: KLineData[];
+}
+
 // ============ 请求类型 ============
 
 export interface AnalysisRequest {

@@ -4,6 +4,7 @@ import { ReportOverview } from './ReportOverview';
 import { ReportStrategy } from './ReportStrategy';
 import { ReportNews } from './ReportNews';
 import { ReportDetails } from './ReportDetails';
+import { StockKLineChart } from '../chart';
 
 interface ReportSummaryProps {
   data: AnalysisResult | AnalysisReport;
@@ -38,6 +39,12 @@ export const ReportSummary: React.FC<ReportSummaryProps> = ({
 
       {/* 资讯区 */}
       <ReportNews queryId={queryId} />
+
+      {/* K 线图区 */}
+      <StockKLineChart
+        stockCode={meta.stockCode}
+        stockName={meta.stockName}
+      />
 
       {/* 透明度与追溯区 */}
       <ReportDetails details={details} queryId={queryId} />

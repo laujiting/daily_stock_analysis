@@ -6,8 +6,10 @@ import { analysisApi, DuplicateTaskError } from '../api/analysis';
 import { validateStockCodes } from '../utils/validation';
 import { getRecentStartDate, toDateInputValue } from '../utils/format';
 import { useAnalysisStore } from '../stores/analysisStore';
-import { ReportSummary } from '../components/report';
-import { HistoryList } from '../components/history';
+import { useStockStore } from '../stores/stockStore';
+import { ReportSummary, DateFilter } from '../components/report';
+import { BottomHistoryPanel } from '../components/history';
+import { StockMenu } from '../components/stock/StockMenu';
 import { TaskPanel } from '../components/tasks';
 import { useTaskStream } from '../hooks';
 
@@ -17,6 +19,7 @@ import { useTaskStream } from '../hooks';
  */
 const HomePage: React.FC = () => {
   const { setLoading, setError: setStoreError } = useAnalysisStore();
+  const { selectedStock, setSelectedStock } = useStockStore();
 
   // 输入状态
   const [stockCodeInput, setStockCodeInput] = useState('');
@@ -36,6 +39,10 @@ const HomePage: React.FC = () => {
   // 报告详情状态
   const [selectedReport, setSelectedReport] = useState<AnalysisReport | null>(null);
   const [isLoadingReport, setIsLoadingReport] = useState(false);
+
+  // 日期筛选状态
+  const [availableDates, setAvailableDates] = useState<string[]>([]);
+  const [selectedDate, setSelectedDate] = useState<string | undefined>();
 
   // 任务队列状态
   const [activeTasks, setActiveTasks] = useState<TaskInfo[]>([]);
@@ -109,11 +116,14 @@ const HomePage: React.FC = () => {
         limit: pageSize,
       });
 
-      if (reset) {
-        setHistoryItems(response.items);
-      } else {
-        setHistoryItems(prev => [...prev, ...response.items]);
-      }
+      const allItems = reset ? response.items : [...historyItems, ...response.items];
+      setHistoryItems(allItems);
+
+      // 提取所有唯一的日期（YYYY-MM-DD格式）
+      const dates = Array.from(new Set(
+        allItems.map(item => item.createdAt.split('T')[0])
+      )).sort();
+      setAvailableDates(dates);
 
       // 判断是否还有更多数据
       const totalLoaded = reset ? response.items.length : historyItems.length + response.items.length;
@@ -158,6 +168,9 @@ const HomePage: React.FC = () => {
     // 取消当前分析请求的结果显示（通过递增 requestId）
     analysisRequestIdRef.current += 1;
 
+    // 清空选中的股票，因为现在是通过历史记录选择
+    setSelectedStock(null);
+
     setIsLoadingReport(true);
     try {
       const report = await historyApi.getDetail(queryId);
@@ -168,6 +181,39 @@ const HomePage: React.FC = () => {
       setIsLoadingReport(false);
     }
   };
+
+  // 加载指定股票的最新报告
+  const loadLatestReportForStock = useCallback(async (stockCode: string) => {
+    setIsLoadingReport(true);
+    try {
+      // 获取该股票的历史记录，取最新的一条
+      const response = await historyApi.getList({
+        stockCode,
+        page: 1,
+        limit: 1,
+      });
+
+      if (response.items.length > 0) {
+        const latestItem = response.items[0];
+        const report = await historyApi.getDetail(latestItem.queryId);
+        setSelectedReport(report);
+      } else {
+        setSelectedReport(null);
+      }
+    } catch (err) {
+      console.error('Failed to load latest report for stock:', err);
+      setSelectedReport(null);
+    } finally {
+      setIsLoadingReport(false);
+    }
+  }, []);
+
+  // 监听选中股票的变化，加载对应的最新报告
+  useEffect(() => {
+    if (selectedStock) {
+      loadLatestReportForStock(selectedStock);
+    }
+  }, [selectedStock, loadLatestReportForStock]);
 
   // 分析股票（支持批量模式）
   const handleAnalyze = async () => {
@@ -397,51 +443,74 @@ const HomePage: React.FC = () => {
       </header>
 
       {/* 主内容区 */}
-      <main className="flex-1 flex overflow-hidden p-3 gap-3">
-{/* 左侧：任务面板 + 历史列表 */}
-        <div className="flex flex-col gap-3 w-64 flex-shrink-0 overflow-hidden">
-          {/* 任务面板 */}
-          <TaskPanel tasks={activeTasks} />
+      <main className="flex-1 flex flex-col overflow-hidden">
+        <div className="flex-1 flex overflow-hidden p-3 gap-3">
+          {/* 左侧：任务面板 + 股票菜单 */}
+          <div className="flex flex-col gap-3 w-64 flex-shrink-0 overflow-hidden">
+            {/* 任务面板 */}
+            <TaskPanel tasks={activeTasks} />
 
-          {/* 历史列表 */}
-          <HistoryList
-            items={historyItems}
-            isLoading={isLoadingHistory}
-            isLoadingMore={isLoadingMore}
-            hasMore={hasMore}
-            selectedQueryId={selectedReport?.meta.queryId}
-            onItemClick={handleHistoryClick}
-            onLoadMore={handleLoadMore}
-            className="max-h-[62vh] overflow-hidden"
-          />
+            {/* 股票分类菜单 */}
+            <StockMenu
+              className="flex-1"
+              onStockSelect={(stockCode) => {
+                setSelectedStock(stockCode);
+              }}
+            />
+          </div>
+
+          {/* 右侧报告详情 */}
+          <section className="flex-1 overflow-y-auto pl-1 flex flex-col gap-3">
+            {/* 日期筛选栏 */}
+            {availableDates.length > 0 && (
+              <DateFilter
+                availableDates={availableDates}
+                selectedDate={selectedDate}
+                onDateChange={(date) => {
+                  setSelectedDate(date);
+                  // 可以在这里实现按日期筛选报告的逻辑
+                  console.log('Selected date:', date);
+                }}
+                onClear={() => setSelectedDate(undefined)}
+              />
+            )}
+
+            {/* 报告内容 */}
+            {isLoadingReport ? (
+              <div className="flex flex-col items-center justify-center h-full">
+                <div className="w-10 h-10 border-3 border-cyan/20 border-t-cyan rounded-full animate-spin" />
+                <p className="mt-3 text-secondary text-sm">加载报告中...</p>
+              </div>
+            ) : selectedReport ? (
+              <div className="max-w-4xl">
+                <ReportSummary data={selectedReport} isHistory />
+              </div>
+            ) : (
+              <div className="flex flex-col items-center justify-center h-full text-center">
+                <div className="w-12 h-12 mb-3 rounded-xl bg-elevated flex items-center justify-center">
+                  <svg className="w-6 h-6 text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                  </svg>
+                </div>
+                <h3 className="text-base font-medium text-white mb-1.5">开始分析</h3>
+                <p className="text-xs text-muted max-w-xs">
+                  输入股票代码进行分析，或从左侧选择已分析的股票查看
+                </p>
+              </div>
+            )}
+          </section>
         </div>
 
-        {/* 右侧报告详情 */}
-        <section className="flex-1 overflow-y-auto pl-1">
-          {isLoadingReport ? (
-            <div className="flex flex-col items-center justify-center h-full">
-              <div className="w-10 h-10 border-3 border-cyan/20 border-t-cyan rounded-full animate-spin" />
-              <p className="mt-3 text-secondary text-sm">加载报告中...</p>
-            </div>
-          ) : selectedReport ? (
-            <div className="max-w-4xl">
-              {/* 报告内容 */}
-              <ReportSummary data={selectedReport} isHistory />
-            </div>
-          ) : (
-            <div className="flex flex-col items-center justify-center h-full text-center">
-              <div className="w-12 h-12 mb-3 rounded-xl bg-elevated flex items-center justify-center">
-                <svg className="w-6 h-6 text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-                </svg>
-              </div>
-              <h3 className="text-base font-medium text-white mb-1.5">开始分析</h3>
-              <p className="text-xs text-muted max-w-xs">
-                输入股票代码进行分析，或从左侧选择历史报告查看
-              </p>
-            </div>
-          )}
-        </section>
+        {/* 底部历史记录面板 */}
+        <BottomHistoryPanel
+          items={historyItems}
+          isLoading={isLoadingHistory}
+          isLoadingMore={isLoadingMore}
+          hasMore={hasMore}
+          selectedQueryId={selectedReport?.meta.queryId}
+          onItemClick={handleHistoryClick}
+          onLoadMore={handleLoadMore}
+        />
       </main>
     </div>
   );

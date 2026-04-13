@@ -19,7 +19,7 @@ import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor, Future
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, date
 from enum import Enum
 from typing import Optional, Dict, Set, List, Callable, Any, TYPE_CHECKING
 
@@ -94,13 +94,25 @@ class TaskInfo:
 class DuplicateTaskError(Exception):
     """
     重复提交异常
-    
+
     当股票已在分析中时抛出此异常
     """
     def __init__(self, stock_code: str, existing_task_id: str):
         self.stock_code = stock_code
         self.existing_task_id = existing_task_id
         super().__init__(f"股票 {stock_code} 正在分析中 (task_id: {existing_task_id})")
+
+
+class DuplicateAnalysisError(Exception):
+    """
+    重复分析异常
+
+    当该交易日已经有该股票的分析记录时抛出此异常
+    """
+    def __init__(self, stock_code: str, trading_date: date):
+        self.stock_code = stock_code
+        self.trading_date = trading_date
+        super().__init__(f"股票 {stock_code} 在 {trading_date.isoformat()} 已经有分析记录，避免重复分析")
 
 
 class AnalysisTaskQueue:
@@ -219,11 +231,19 @@ class AnalysisTaskQueue:
             DuplicateTaskError: 股票正在分析中
         """
         with self._data_lock:
-            # 检查重复
+            # 检查是否正在分析中
             if stock_code in self._analyzing_stocks:
                 existing_task_id = self._analyzing_stocks[stock_code]
                 raise DuplicateTaskError(stock_code, existing_task_id)
-            
+
+            # 非强制刷新的情况下，检查是否已有该交易日的分析记录
+            if not force_refresh:
+                from src.services.stock_service import StockService
+                stock_service = StockService()
+                effective_date = stock_service.get_effective_analysis_date()
+                if stock_service.has_analysis_for_date(stock_code, effective_date):
+                    raise DuplicateAnalysisError(stock_code, effective_date)
+
             # 创建任务
             task_id = uuid.uuid4().hex
             task_info = TaskInfo(

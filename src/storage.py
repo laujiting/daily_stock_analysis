@@ -212,9 +212,12 @@ class AnalysisHistory(Base):
     take_profit = Column(Float)
 
     created_at = Column(DateTime, default=datetime.now, index=True)
+    # 分析使用的收盘价对应的交易日（用于查重，避免周末/节假日重复分析）
+    trading_date = Column(Date, nullable=False, index=True)
 
     __table_args__ = (
         Index('ix_analysis_code_time', 'code', 'created_at'),
+        Index('ix_analysis_code_trading_date', 'code', 'trading_date'),
     )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -237,6 +240,7 @@ class AnalysisHistory(Base):
             'stop_loss': self.stop_loss,
             'take_profit': self.take_profit,
             'created_at': self.created_at.isoformat() if self.created_at else None,
+            'trading_date': self.trading_date.isoformat() if self.trading_date else None,
         }
 
 
